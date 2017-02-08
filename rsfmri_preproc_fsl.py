@@ -348,7 +348,7 @@ register_flow.connect(reg_inputnode, 'target_image_brain', func2standard_warp, '
 register_flow.connect(func2highres_bbr, 'out_matrix_file', func2standard_warp, 'premat')
 register_flow.connect(highres2standard_warp, 'fieldcoeff_file', func2standard_warp, 'warp1')
 
-# Apply nonlinear transform to the reference image. First to anatomical and then to target
+# Apply nonlinear transform to the reference image.
 warpmean = Node(fsl.ApplyWarp(interp='trilinear'), name='warpmean')
 register_flow.connect(extract_ref, 'roi_file', warpmean, 'in_file')
 register_flow.connect(reg_inputnode, 'target_image_brain', warpmean, 'ref_file')
@@ -379,15 +379,15 @@ down_sampler_.inputs.in_file = template_brain
 down_sampler = Node(fsl.FLIRT(), name='down_sampler')
 down_sampler.inputs.apply_isoxfm = down_sampling
 
-# Normalize functional images to down sampled template. First to anatomical and then to target
+# Normalize functional images to down sampled template
 warpall_func = MapNode(fsl.ApplyWarp(interp='trilinear'), iterfield=['in_file'], nested=True, name='warpall_func')
 
-# Normalize structural images to original template. First to anatomical and then to target
-warpall_struct_org = MapNode(fsl.ApplyWarp(interp='trilinear'), iterfield=['in_file'], nested=True,
+# Normalize structural images to original template
+warpall_struct_org = MapNode(fsl.ApplyWarp(interp='spline'), iterfield=['in_file'], nested=True,
                              name='warpall_struct_org')
 
-# Normalize structural images to down sampled template. First to anatomical and then to target
-warpall_struct = MapNode(fsl.ApplyWarp(interp='trilinear'), iterfield=['in_file'], nested=True, name='warpall_struct')
+# Normalize structural images to down sampled template
+warpall_struct = MapNode(fsl.ApplyWarp(interp='spline'), iterfield=['in_file'], nested=True, name='warpall_struct')
 
 # Connect all components of the preprocessing workflow
 preproc = Workflow(name="preproc")
