@@ -22,14 +22,17 @@ Created by Willem Bruin
 
 import os
 from os import path as osp
+from time import time
 
 import nipype.interfaces.fsl as fsl
+from nipype import LooseVersion
 from nipype.algorithms.misc import Gunzip
 from nipype.interfaces.io import SelectFiles, DataSink
 from nipype.interfaces.matlab import MatlabCommand
 from nipype.interfaces.utility import IdentityInterface, Merge
 from nipype.pipeline.engine import Workflow, Node, MapNode
-from nipype import LooseVersion
+
+t_start = time()
 
 # Check FSL version
 version = 0
@@ -161,6 +164,7 @@ getthresh = Node(fsl.ImageStats(op_string='-p 2 -p 98'), name='getthreshold')
 # Threshold the functional data at 10% of the 98th percentile
 threshold = Node(fsl.ImageMaths(out_data_type='char', suffix='_thresh'), name='threshold')
 
+
 # Define a function which creates an operand string that selects 10% of the intensity
 def getthreshop(thresh):
     return '-thr %.10f -Tmin -bin' % (0.1 * thresh[1])
@@ -272,8 +276,11 @@ reg_inputnode = Node(IdentityInterface(fields=['functional_image',
                                                'config_file']),
                      name='inputspec')
 
-reg_outputnode = Node(IdentityInterface(fields=['func2anat_transform',
-                                                'anat2target_transform',
+reg_outputnode = Node(IdentityInterface(fields=['func2highres',
+                                                'highres2standard',
+                                                'func2standard',
+                                                'highres2standard_warp',
+                                                'func2standard_warp',
                                                 'transformed_mean',
                                                 'example_func'
                                                 ]),
@@ -297,51 +304,64 @@ pickindex = lambda x, i: x[i]
 register_flow.connect(fast, ('partial_volume_files', pickindex, 2), binarize, 'in_file')
 
 # Calculate rigid transform from the reference functional image to its anatomical image.
-example_func2highres = Node(fsl.FLIRT(), name='example_func2highres')
-example_func2highres.inputs.dof = 6
-register_flow.connect(extract_ref, 'roi_file', example_func2highres, 'in_file')
-register_flow.connect(stripper, 'out_file', example_func2highres, 'reference')
+func2highres = Node(fsl.FLIRT(), name='func2highres')
+func2highres.inputs.dof = 6
+register_flow.connect(extract_ref, 'roi_file', func2highres, 'in_file')
+register_flow.connect(stripper, 'out_file', func2highres, 'reference')
 
 # Now use bbr cost function to improve the transform
-example_func2highres_bbr = Node(fsl.FLIRT(), name='example_func2highres_bbr')
-example_func2highres_bbr.inputs.dof = 6
-example_func2highres_bbr.inputs.cost = 'bbr'
-example_func2highres_bbr.inputs.schedule = os.path.join(os.getenv('FSLDIR'), 'etc/flirtsch/bbr.sch')
-register_flow.connect(extract_ref, 'roi_file', example_func2highres_bbr, 'in_file')
-register_flow.connect(binarize, 'out_file', example_func2highres_bbr, 'wm_seg')
-register_flow.connect(reg_inputnode, 'anatomical_image', example_func2highres_bbr, 'reference')
-register_flow.connect(example_func2highres, 'out_matrix_file', example_func2highres_bbr, 'in_matrix_file')
+func2highres_bbr = Node(fsl.FLIRT(), name='func2highres_bbr')
+func2highres_bbr.inputs.dof = 6
+func2highres_bbr.inputs.cost = 'bbr'
+func2highres_bbr.inputs.schedule = os.path.join(os.getenv('FSLDIR'), 'etc/flirtsch/bbr.sch')
+register_flow.connect(extract_ref, 'roi_file', func2highres_bbr, 'in_file')
+register_flow.connect(binarize, 'out_file', func2highres_bbr, 'wm_seg')
+register_flow.connect(reg_inputnode, 'anatomical_image', func2highres_bbr, 'reference')
+register_flow.connect(func2highres, 'out_matrix_file', func2highres_bbr, 'in_matrix_file')
 
-# Calculate affine transform from anatomical to target
-highres2standard_affine = Node(fsl.FLIRT(), name='highres2standard_linear')
-highres2standard_affine.inputs.dof = 12
-highres2standard_affine.inputs.searchr_x = [-90, 90]
-highres2standard_affine.inputs.searchr_y = [-90, 90]
-highres2standard_affine.inputs.searchr_z = [-90, 90]
-register_flow.connect(stripper, 'out_file', highres2standard_affine, 'in_file')
-register_flow.connect(reg_inputnode, 'target_image_brain', highres2standard_affine, 'reference')
+# Calculate affine transform from anatomical to target (default interpolation is trilinear)
+highres2standard = Node(fsl.FLIRT(), name='highres2standard_affine')
+highres2standard.inputs.dof = 12
+highres2standard.inputs.searchr_x = [-90, 90]
+highres2standard.inputs.searchr_y = [-90, 90]
+highres2standard.inputs.searchr_z = [-90, 90]
+register_flow.connect(stripper, 'out_file', highres2standard, 'in_file')
+register_flow.connect(reg_inputnode, 'target_image_brain', highres2standard, 'reference')
 
-# Calculate nonlinear transform from anatomical to target
-highres2standard_nonlinear = Node(fsl.FNIRT(), name='highres2standard_nonlinear')
-highres2standard_nonlinear.inputs.fieldcoeff_file = True
-register_flow.connect(highres2standard_affine, 'out_matrix_file', highres2standard_nonlinear, 'affine_file')
-register_flow.connect(reg_inputnode, 'anatomical_image', highres2standard_nonlinear, 'in_file')
-register_flow.connect(reg_inputnode, 'config_file', highres2standard_nonlinear, 'config_file')
-register_flow.connect(reg_inputnode, 'target_image', highres2standard_nonlinear, 'ref_file')
-register_flow.connect(reg_inputnode, 'target_mask', highres2standard_nonlinear, 'refmask_file')
+# Calculate nonlinear transform from anatomical to target (default warp resolution is 10,10,10)
+highres2standard_warp = Node(fsl.FNIRT(), name='highres2standard_nonlinear')
+highres2standard_warp.inputs.fieldcoeff_file = True
+register_flow.connect(highres2standard, 'out_matrix_file', highres2standard_warp, 'affine_file')
+register_flow.connect(reg_inputnode, 'anatomical_image', highres2standard_warp, 'in_file')
+register_flow.connect(reg_inputnode, 'config_file', highres2standard_warp, 'config_file')
+register_flow.connect(reg_inputnode, 'target_image', highres2standard_warp, 'ref_file')
+register_flow.connect(reg_inputnode, 'target_mask', highres2standard_warp, 'refmask_file')
 
-# Transform the reference image. First to anatomical and then to target
-warpmean = Node(fsl.ApplyWarp(interp='spline'), name='warpmean')
+# Combine linear FLIRT transformations into one to create a transformation matrix from functional to target
+func2standard = Node(fsl.ConvertXFM(concat_xfm=True), name='func2standard_linear')
+register_flow.connect(func2highres_bbr, 'out_matrix_file', func2standard, 'in_file')
+register_flow.connect(highres2standard, 'out_matrix_file', func2standard, 'in_file2')
+
+# Combine non linear FNIRT transformations into one to create a transformation matrix from functional to target
+func2standard_warp = Node(fsl.ConvertWarp(), name='example_func2standard_nonlinear')
+register_flow.connect(reg_inputnode, 'target_image_brain', func2standard_warp, 'reference')
+register_flow.connect(func2highres_bbr, 'out_matrix_file', func2standard_warp, 'premat')
+register_flow.connect(highres2standard_warp, 'fieldcoeff_file', func2standard_warp, 'warp1')
+
+# Apply nonlinear transform to the reference image. First to anatomical and then to target
+warpmean = Node(fsl.ApplyWarp(interp='trilinear'), name='warpmean')
 register_flow.connect(extract_ref, 'roi_file', warpmean, 'in_file')
-register_flow.connect(example_func2highres_bbr, 'out_matrix_file', warpmean, 'premat')
-register_flow.connect(reg_inputnode, 'target_image', warpmean, 'ref_file')
-register_flow.connect(highres2standard_nonlinear, 'fieldcoeff_file', warpmean, 'field_file')
+register_flow.connect(reg_inputnode, 'target_image_brain', warpmean, 'ref_file')
+register_flow.connect(func2standard_warp, 'out_file', warpmean, 'field_file')
 
 # Assign all the output files
 register_flow.connect(extract_ref, 'roi_file', reg_outputnode, 'example_func')
 register_flow.connect(warpmean, 'out_file', reg_outputnode, 'transformed_mean')
-register_flow.connect(example_func2highres_bbr, 'out_matrix_file', reg_outputnode, 'func2anat_transform')
-register_flow.connect(highres2standard_nonlinear, 'fieldcoeff_file', reg_outputnode, 'anat2target_transform')
+register_flow.connect(func2highres_bbr, 'out_matrix_file', reg_outputnode, 'func2highres')
+register_flow.connect(highres2standard, 'out_matrix_file', reg_outputnode, 'highres2standard')
+register_flow.connect(highres2standard_warp, 'fieldcoeff_file', reg_outputnode, 'highres2standard_warp')
+register_flow.connect(func2standard, 'out_file', reg_outputnode, 'func2standard')
+register_flow.connect(func2standard_warp, 'out_file', reg_outputnode, 'func2standard_warp')
 
 # Assign templates
 register_flow.inputs.inputspec.target_image = template
@@ -355,7 +375,7 @@ slicer.inputs.args = '-a'
 
 # Down sample template using isotropic resampling
 down_sampler_ = Node(IdentityInterface(fields=['in_file']), name='identitynode')
-down_sampler_.inputs.in_file = template
+down_sampler_.inputs.in_file = template_brain
 down_sampler = Node(fsl.FLIRT(), name='down_sampler')
 down_sampler.inputs.apply_isoxfm = down_sampling
 
@@ -363,11 +383,11 @@ down_sampler.inputs.apply_isoxfm = down_sampling
 warpall_func = MapNode(fsl.ApplyWarp(interp='trilinear'), iterfield=['in_file'], nested=True, name='warpall_func')
 
 # Normalize structural images to original template. First to anatomical and then to target
-warpall_struct_org = MapNode(fsl.ApplyWarp(interp='spline'),
-                             iterfield=['in_file'], nested=True, name='warpall_struct_org')
+warpall_struct_org = MapNode(fsl.ApplyWarp(interp='trilinear'), iterfield=['in_file'], nested=True,
+                             name='warpall_struct_org')
 
 # Normalize structural images to down sampled template. First to anatomical and then to target
-warpall_struct = MapNode(fsl.ApplyWarp(interp='spline'), iterfield=['in_file'], nested=True, name='warpall_struct')
+warpall_struct = MapNode(fsl.ApplyWarp(interp='trilinear'), iterfield=['in_file'], nested=True, name='warpall_struct')
 
 # Connect all components of the preprocessing workflow
 preproc = Workflow(name="preproc")
@@ -414,17 +434,16 @@ preproc.connect([
     (down_sampler_, down_sampler, [('in_file', 'reference')]),
 
     (highpass_flow, warpall_func, [('outputspec.highpassed_file', 'in_file')]),
-    (register_flow, warpall_func, [('outputspec.func2anat_transform', 'premat')]),
     (down_sampler, warpall_func, [('out_file', 'ref_file')]),
-    (register_flow, warpall_func, [('outputspec.anat2target_transform', 'field_file')]),
+    (register_flow, warpall_func, [('outputspec.func2standard_warp', 'field_file')]),
 
     (bet_struct, warpall_struct, [('out_file', 'in_file')]),
     (down_sampler, warpall_struct, [('out_file', 'ref_file')]),
-    (register_flow, warpall_struct, [('outputspec.anat2target_transform', 'field_file')]),
+    (register_flow, warpall_struct, [('outputspec.highres2standard_warp', 'field_file')]),
 
     (bet_struct, warpall_struct_org, [('out_file', 'in_file')]),
     (down_sampler_, warpall_struct_org, [('in_file', 'ref_file')]),
-    (register_flow, warpall_struct_org, [('outputspec.anat2target_transform', 'field_file')]),
+    (register_flow, warpall_struct_org, [('outputspec.highres2standard_warp', 'field_file')]),
 ])
 
 # Datasink
@@ -454,8 +473,12 @@ preproc.connect([(infosource, selectfiles, [('subject_id', 'subject_id')
                  (dilatemask, datasink, [('out_file', 'dilated_mask')]),
                  (register_flow, datasink, [('outputspec.transformed_mean', 'transformed_mean'),
                                             ('outputspec.example_func', 'example_func'),
-                                            ('outputspec.func2anat_transform', 'func2anat_transform'),
-                                            ('outputspec.anat2target_transform', 'anat2target_transform')]),
+                                            ('outputspec.func2highres', 'func2highres'),
+                                            ('outputspec.highres2standard', 'highres2standard'),
+                                            ('outputspec.highres2standard_warp', 'highres2standard_warp'),
+                                            ('outputspec.func2standard', 'func2standard'),
+                                            ('outputspec.func2standard_warp', 'func2standard_warp'),
+                                            ]),
                  (mean_func_brain, datasink, [('mask_file', 'mask')]),
                  (masker_func, datasink, [('out_file', 'masked_file')]),
                  (susan_flow, datasink, [('outputspec.smoothed_file', 'smoothed_file')]),
@@ -464,6 +487,10 @@ preproc.connect([(infosource, selectfiles, [('subject_id', 'subject_id')
                  (warpall_struct, datasink, [('out_file', 'normalized_struct')]),
                  ])
 
+
 preproc.base_dir = WORKING_DIR
 preproc.write_graph(graph2use='colored')
-preproc.run('MultiProc', plugin_args={'n_procs': 8})
+preproc.run('MultiProc', plugin_args={'n_procs': 15})
+
+t_end = time()
+print ('Time taken: {:.2f}min'.format((t_end - t_start) / 60.))
